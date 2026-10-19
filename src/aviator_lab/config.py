@@ -20,12 +20,11 @@ DB_PATH = VALIDATED_DIR / "aviator_lab.sqlite"
 # Seuils d'analyse configurables (multiplicateurs)
 DEFAULT_THRESHOLDS = (1.5, 2.0, 3.0, 5.0, 10.0, 20.0)
 
-# HYPOTHÈSE H0 (à vérifier dans la documentation officielle) :
-# taux de retour au joueur (RTP) théorique. Ce n'est PAS une vérité établie.
-HYPOTHETICAL_RTP = 0.97
+# Aucun RTP théorique n'est activé sans source documentaire fiable.
+HYPOTHETICAL_RTP = None
 
 # Niveau de confiance par défaut des intervalles
 CONFIDENCE_LEVEL = 0.95
 
-# Provenance possible des données (affichée dans le tableau de bord)
-ORIGINS = ("game", "manual", "import", "simulation")
+# Origine des observations, distincte du moyen de collecte (source).
+ORIGINS = ("real", "synthetic", "simulated")

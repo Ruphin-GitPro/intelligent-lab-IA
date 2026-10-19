@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Aviator Intelligence Lab — diagnostic Bet261",
+  "version": "0.1.0",
+  "description": "Diagnostic local en lecture seule pour préparer une collecte DOM vérifiée.",
+  "permissions": [],
+  "host_permissions": [
+    "https://bet261.mg/*",
+    "https://*.bet261.mg/*",
+    "https://*.crash.aviator.studio/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://bet261.mg/*",
+        "https://*.bet261.mg/*",
+        "https://*.crash.aviator.studio/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "État Aviator Intelligence Lab",
+    "default_popup": "popup.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "aviator-intelligence-lab-local@localhost"
+    }
+  }
+}

@@ -417,3 +417,49 @@ test("file : bornée, les plus anciens éléments sont abandonnés et comptés",
   assert.equal(queue.status().pending, 3);
   assert.equal(queue.status().dropped, 2);
 });
+
+// --- Agrégats publics (valeurs SYNTHÉTIQUES, structure inspirée de la fenêtre du jeu) ---
+const { createAggregateSampler, inspectRoundAggregates, parseAggregateNumber } = require("../content.js");
+
+test("parseAggregateNumber lit les montants affichés et refuse le reste", () => {
+  assert.equal(parseAggregateNumber("766,062.75"), 766062.75);
+  assert.equal(parseAggregateNumber("766 062.75 MGA"), 766062.75);
+  assert.equal(parseAggregateNumber("3779"), 3779);
+  assert.equal(parseAggregateNumber("abc"), null);
+  assert.equal(parseAggregateNumber("12.345"), null);
+});
+
+test("inspectRoundAggregates lit les trois agrégats et ignore les lignes de joueurs", () => {
+  const header = element("div", { text: "Paris totaux 3779" });
+  const ratioLabel = element("span", { text: "Paris totaux" });
+  const ratioValue = element("span", { text: "3289/3779" });
+  const ratioCard = element("div", { text: "Paris totaux 3289/3779", children: [ratioLabel, ratioValue] });
+  const win = element("div", { text: "Gain total MGA 766,062.75" });
+  const player = element("div", { text: "+*****6 254,631.23" });
+  const result = inspectRoundAggregates([header, ratioCard, ratioLabel, ratioValue, win, player]);
+  assert.equal(result.found, true);
+  const byRaw = Object.fromEntries(result.items.map((item) => [item.rawText, item]));
+  assert.equal(byRaw["Paris totaux 3779"].value, 3779);
+  assert.equal(byRaw["Paris totaux 3289/3779"].placed, 3289);
+  assert.equal(byRaw["Paris totaux 3289/3779"].total, 3779);
+  assert.equal(byRaw["Gain total MGA 766,062.75"].value, 766062.75);
+  assert.ok(!JSON.stringify(result).includes("254,631"));
+});
+
+test("createAggregateSampler n'ajoute une entrée que si une valeur change", () => {
+  let tick = 0;
+  const sample = createAggregateSampler(3, () => `t${tick++}`);
+  const view = (bets, win) => ({ found: true, items: [
+    { label: "paris_totaux", kind: "number", value: bets },
+    { label: "gain_total", kind: "number", value: win }
+  ] });
+  assert.equal(sample({ found: false, items: [] }).status, "no_aggregates");
+  sample(view(100, 0));
+  sample(view(100, 0));
+  sample(view(100, 50));
+  sample(view(120, 50));
+  const out = sample(view(130, 70));
+  assert.equal(out.sampleCount, 4);
+  assert.equal(out.samples.length, 3);
+  assert.deepEqual(out.samples.map((item) => item.totalWin), [50, 50, 70]);
+});

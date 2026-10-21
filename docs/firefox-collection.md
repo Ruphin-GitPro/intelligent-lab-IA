@@ -1,5 +1,15 @@
 # Collecte Firefox locale
 
+## Historique des paris affiché
+
+L'extension lit les lignes présentes dans le DOM de l'historique : date affichée,
+mise, multiplicateur de retrait et gain affichés en MGA. Elle les envoie à
+l'API locale, qui les enregistre dans `personal_bets` et évite les doublons lors
+des inspections répétées. Les champs vides restent inconnus; aucun gain ou
+multiplicateur n'est déduit. La date de l'interface n'a qu'une précision à la
+minute. Seules les lignes déjà chargées par la page sont visibles; faire défiler
+ou paginer peut être nécessaire pour charger l'historique complet.
+
 ## État actuel et limite connue
 
 Le projet avait SQLite, un dépôt de stockage, les analyses et le dashboard

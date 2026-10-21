@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
 import logging
 import time
 from typing import Any
@@ -157,16 +158,16 @@ def create_handler(repository: RoundRepository):
                 self._send(403, {"error": "origin_refused"})
                 return
             path = urlparse(self.path).path
-            if path not in {"/api/v1/rounds", "/api/v1/heartbeat", "/api/v1/history-transitions"}:  # MODIFIÉ
+            if path not in {"/api/v1/rounds", "/api/v1/heartbeat", "/api/v1/history-transitions", "/api/v1/personal-bets"}:
                 self._send(404, {"error": "not_found"})
                 return
             try:
                 size = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 size = 0
-            if not 1 <= size <= 16_384:
+            if not 1 <= size <= 65_536:
                 _record_collection_error("Taille de requête invalide.")
-                self._send(413 if size > 16_384 else 400, {"error": "invalid_body_size"})
+                self._send(413 if size > 65_536 else 400, {"error": "invalid_body_size"})
                 return
             if self.headers.get_content_type() != "application/json":
                 _record_collection_error("La requête doit être au format JSON.")
@@ -183,6 +184,38 @@ def create_handler(repository: RoundRepository):
                 if path == "/api/v1/history-transitions":  # AJOUT
                     self._handle_history_transition(payload)  # AJOUT
                     return  # AJOUT
+                if path == "/api/v1/personal-bets":
+                    if not (self.headers.get("Origin") or "").startswith("moz-extension://"):
+                        self._send(403, {"error": "extension_origin_required"})
+                        return
+                    rows = payload.get("bets")
+                    if not isinstance(rows, list) or len(rows) > 100:
+                        self._send(400, {"error": "invalid_bets"})
+                        return
+                    from datetime import datetime
+                    from aviator_lab.storage import DuplicateBetError
+                    saved = duplicates = 0
+                    occurrences: dict[str, int] = {}
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            raise ValueError("Chaque pari doit être un objet JSON.")
+                        identity = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                        occurrences[identity] = occurrences.get(identity, 0) + 1
+                        external_id = "dom-" + hashlib.sha256(
+                            f"{identity}:{occurrences[identity]}".encode()
+                        ).hexdigest()
+                        try:
+                            repository.add_bet(
+                                source="extension DOM Bet261", origin="real", external_id=external_id,
+                                bet_at=datetime.fromisoformat(row["bet_at"]) if row.get("bet_at") else None,
+                                stake_amount=row.get("stake_amount"), cashout_multiplier=row.get("cashout_multiplier"),
+                                returned_amount=row.get("returned_amount"), currency=row.get("currency"),
+                            )
+                            saved += 1
+                        except DuplicateBetError:
+                            duplicates += 1
+                    self._send(201 if saved else 200, {"accepted": True, "saved": saved, "duplicates": duplicates})
+                    return
                 # `completed: true` is client supplied and cannot authenticate either
                 # provenance or finality. Keep this endpoint closed until a verified,
                 # authorized source adapter is implemented.

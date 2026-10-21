@@ -109,6 +109,38 @@ function scanOpenDocument(doc, maxElements = MAX_INSPECTED_ELEMENTS) {
   return { elements, shadowRoots, inspectedElementCount: elements.length, truncated };
 }
 
+function inspectPersonalBets(doc) {
+  const containers = Array.from(doc.querySelectorAll('[class*="_bets_1gs3m_"]'));
+  const bets = [];
+  for (const container of containers) {
+    for (const row of Array.from(container.children || [])) {
+      const dateText = row.querySelector('span')?.textContent?.trim() || "";
+      const betBox = row.querySelector('[class*="_bet_4mla1_"]');
+      const winBox = row.querySelector('[class*="_win_4mla1_"]');
+      if (!betBox || !winBox) continue;
+      const stakeText = betBox.querySelector('span')?.textContent?.trim() || "";
+      const multiplierText = betBox.querySelector('[class*="_container_1ckpf_"] span')?.textContent?.trim() || "";
+      const returnedText = winBox.querySelector('span')?.textContent?.trim() || "";
+      const amount = (value) => /^\d{1,10}(?:[.,]\d{1,4})?$/.test(value) ? value.replace(",", ".") : null;
+      const dateMatch = /^(\d{2})-(\d{2})-(\d{2})\s*[·]\s*(\d{2}):(\d{2})$/.exec(dateText);
+      if (!dateMatch || !amount(stakeText)) continue;
+      const [, day, month, shortYear, hour, minute] = dateMatch;
+      const year = Number(shortYear) >= 70 ? 1900 + Number(shortYear) : 2000 + Number(shortYear);
+      const localDate = new Date(year, Number(month) - 1, Number(day), Number(hour), Number(minute));
+      if (Number.isNaN(localDate.getTime())) continue;
+      const cashout = /^([1-9]\d{0,7}(?:[.,]\d{1,4})?)x$/i.exec(multiplierText);
+      bets.push({
+        bet_at: localDate.toISOString(),
+        stake_amount: amount(stakeText),
+        cashout_multiplier: cashout ? cashout[1].replace(",", ".") : null,
+        returned_amount: amount(returnedText),
+        currency: "MGA"
+      });
+    }
+  }
+  return bets;
+}
+
 function inspectAviatorComponents(doc, limits = {}, accessibleElements = null) {
   const maxElements = limits.maxInspectedElements || MAX_INSPECTED_ELEMENTS;
   const maxReported = limits.maxReportedElements || MAX_REPORTED_ELEMENTS;
@@ -411,6 +443,117 @@ function createHistoryTransitionLog(maxEntries = MAX_TRANSITIONS, now = () => ne
   };
 }
 
+/**
+ * Émetteur de transitions : à chaque changement de la liste d'historique, remet à l'arrière-plan les DEUX
+ * instantanés complets. L'extension ne décide pas qu'une manche est terminée : le serveur refait l'alignement.
+ * Le premier instantané sert de point de départ et n'est jamais envoyé. Une fenêtre vide est ignorée.
+ */
+function createHistoryTransitionEmitter(send, now = () => new Date().toISOString()) {
+  let previous = null;
+  return (historyReport) => {
+    const container = ((historyReport && historyReport.containers) || [])[0];
+    if (!container) return false;
+    const values = container.entries.filter((entry) => entry.validMultiplier).map((entry) => entry.value);
+    if (values.length < 10) return false;
+    if (previous === null) {
+      previous = values;
+      return false;
+    }
+    const changed = previous.length !== values.length || previous.some((value, index) => value !== values[index]);
+    if (!changed) return false;
+    send({ schema: 1, observed_at: now(), previous, next: values });
+    previous = values;
+    return true;
+  };
+}
+
+/**
+ * Agrégats PUBLICS affichés dans la fenêtre du jeu : « Paris totaux », « x/y » et « Gain total ».
+ * Lecture seule et diagnostic : aucune ligne de joueur (noms masqués, mises individuelles) n'est lue,
+ * rien n'est envoyé à l'API ni enregistré. Ne prouve pas que ces valeurs aident à prédire quoi que ce soit.
+ */
+const AGGREGATE_LABEL = /^(paris totaux|gain total(?:\s*mga)?)\s*(.*)$/i;
+const MAX_AGGREGATE_SAMPLES = 120;
+
+function normalizeText(value) {
+  return String(value || "").replace(/[\u00a0\s]+/g, " ").trim();
+}
+
+function parseAggregateNumber(text) {
+  const clean = normalizeText(text).replace(/\s*mga$/i, "");
+  if (!/^\d{1,3}(?:[ ,]\d{3})*(?:\.\d{1,2})?$|^\d+(?:\.\d{1,2})?$/.test(clean)) return null;
+  const value = Number(clean.replace(/[ ,]/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function parseAggregateValue(rest) {
+  const text = normalizeText(rest);
+  const ratio = /^(\d{1,7})\s*\/\s*(\d{1,7})$/.exec(text);
+  if (ratio) return { kind: "ratio", placed: Number(ratio[1]), total: Number(ratio[2]) };
+  const number = parseAggregateNumber(text);
+  return number === null ? null : { kind: "number", value: number };
+}
+
+function inspectRoundAggregates(elements) {
+  const matches = [];
+  for (const node of elements || []) {
+    const text = normalizeText(node.textContent);
+    if (text.length === 0 || text.length > 48) continue;
+    const found = AGGREGATE_LABEL.exec(text);
+    if (!found) continue;
+    const parsed = parseAggregateValue(found[2]);
+    if (!parsed) continue;
+    matches.push({ node, label: found[1].toLowerCase().startsWith("paris") ? "paris_totaux" : "gain_total", parsed, rawText: text });
+  }
+  // Garde l'élément le plus profond : on ignore un ancêtre dont un descendant correspond déjà.
+  const items = matches.filter((item) => !matches.some((other) => other !== item && other.label === item.label
+    && other.rawText === item.rawText && isAncestor(item.node, other.node)));
+  return {
+    found: items.length > 0,
+    items: items.slice(0, 6).map((item) => ({
+      label: item.label,
+      rawText: item.rawText,
+      kind: item.parsed.kind,
+      value: item.parsed.kind === "number" ? item.parsed.value : null,
+      placed: item.parsed.kind === "ratio" ? item.parsed.placed : null,
+      total: item.parsed.kind === "ratio" ? item.parsed.total : null,
+      path: elementPath(item.node)
+    })),
+    note: "Agrégats publics seulement; les lignes individuelles des joueurs ne sont jamais lues."
+  };
+}
+
+function isAncestor(candidate, node) {
+  for (let current = node && node.parentElement; current; current = current.parentElement) {
+    if (current === candidate) return true;
+  }
+  return false;
+}
+
+/** Journal borné : une entrée seulement quand l'une des valeurs affichées change. */
+function createAggregateSampler(maxEntries = MAX_AGGREGATE_SAMPLES, now = () => new Date().toISOString()) {
+  let last = null;
+  let sampleCount = 0;
+  const samples = [];
+  return (aggregates) => {
+    if (!aggregates || !aggregates.found) return { status: "no_aggregates", sampleCount, samples: samples.slice() };
+    const current = { totalBets: null, placed: null, totalBetsDenominator: null, totalWin: null };
+    for (const item of aggregates.items) {
+      if (item.label === "paris_totaux" && item.kind === "number") current.totalBets = item.value;
+      if (item.label === "paris_totaux" && item.kind === "ratio") { current.placed = item.placed; current.totalBetsDenominator = item.total; }
+      if (item.label === "gain_total" && item.kind === "number") current.totalWin = item.value;
+    }
+    const changed = last === null || Object.keys(current).some((key) => current[key] !== last[key]);
+    if (changed) {
+      sampleCount += 1;
+      samples.push({ at: now(), ...current });
+      while (samples.length > maxEntries) samples.shift();
+    }
+    last = current;
+    return { status: "tracking", sampleCount, samples: samples.slice(), note: "Valeurs affichées échantillonnées; rien n'est enregistré." };
+  };
+}
+
 function inspectFrameDocument(child) {
   const scan = scanOpenDocument(child, MAX_INSPECTED_ELEMENTS);
   const history = inspectMultiplierHistories(child, {}, scan.elements, scan.truncated);
@@ -548,6 +691,7 @@ function collectDiagnostic(doc, limits = {}, context = {}) {
   const page = scanDocument(doc, context.isTopFrame === false ? "document d'une frame Bet261 ciblée" : "document courant", domScan);
   const aviator = inspectAviatorComponents(doc, limits, domScan.elements);
   const multiplierHistories = inspectMultiplierHistories(doc, limits, domScan.elements, domScan.truncated);
+  const roundAggregates = inspectRoundAggregates(domScan.elements);
   const readyState = doc.readyState || "unknown";
   // Keep observer node references private to the runtime; JSON output contains only safe summaries.
   const report = {
@@ -588,6 +732,7 @@ function collectDiagnostic(doc, limits = {}, context = {}) {
       limits: aviator.found ? [] : ["Le composant hg-aviator-llc-game avec la classe observée n'est pas accessible dans ce document."]
     },
     multiplierHistories,
+    roundAggregates,
     inaccessibleFrameCount: page.iframes.filter((frame) => !frame.accessible).length,
     inaccessibleFrameReasons: page.iframes.filter((frame) => !frame.accessible).map(({ index, inaccessibleReason }) => ({ index, reason: inaccessibleReason }))
   };
@@ -617,7 +762,7 @@ function createCandidateChangeTracker() {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { collectDiagnostic, createCandidateChangeTracker, alignHistoryWindow, createHistoryEvolutionTracker, createHistoryTransitionLog, elementPath, inspectAviatorComponents, inspectMultiplierHistories, isAllowedHost, isValidDisplayedMultiplier, scanDocument };
+  module.exports = { collectDiagnostic, createCandidateChangeTracker, alignHistoryWindow, createHistoryEvolutionTracker, createHistoryTransitionLog, createHistoryTransitionEmitter, createAggregateSampler, inspectRoundAggregates, parseAggregateNumber, elementPath, inspectAviatorComponents, inspectMultiplierHistories, inspectPersonalBets, isAllowedHost, isValidDisplayedMultiplier, scanDocument };
 }
 
 if (typeof browser !== "undefined" && typeof document !== "undefined") {
@@ -635,7 +780,7 @@ if (typeof browser !== "undefined" && typeof document !== "undefined") {
     const panel = document.createElement("section");
     panel.style.cssText = "font:12px sans-serif;background:#17212b;color:white;padding:8px 10px;border-radius:6px;max-width:360px";
     state = document.createElement("div");
-    state.textContent = "Aviator Lab : diagnostic local; extraction désactivée.";
+    state.textContent = "Aviator Lab : lecture locale des paris affichés; extraction des manches désactivée.";
     connectionState = document.createElement("div");
     connectionState.textContent = "API locale : vérification en cours.";
     button = document.createElement("button");
@@ -647,7 +792,7 @@ if (typeof browser !== "undefined" && typeof document !== "undefined") {
     reportBox.style.cssText = "box-sizing:border-box;width:100%;margin-top:6px;font:11px monospace;color:#111";
     reportBox.setAttribute("aria-label", "Rapport technique local à copier manuellement");
     const copyHelp = document.createElement("div");
-    copyHelp.textContent = "Rapport technique conservé dans Firefox; aucune donnée de jeu n'est envoyée au serveur.";
+    copyHelp.textContent = "Rapport technique local. Les changements de l'historique sont envoyés à l'API locale (127.0.0.1) pour enregistrement.";
     panel.append(state, connectionState, button, reportBox, copyHelp);
     shadow.appendChild(panel);
     (document.documentElement || document.body).appendChild(diagnosticHost);
@@ -658,6 +803,13 @@ if (typeof browser !== "undefined" && typeof document !== "undefined") {
   const trackCandidateChanges = createCandidateChangeTracker();
   const trackHistoryEvolution = createHistoryEvolutionTracker();
   const logHistoryTransitions = createHistoryTransitionLog();
+  const sampleAggregates = createAggregateSampler();
+  const emitHistoryTransition = createHistoryTransitionEmitter((transition) => {
+    browser.runtime.sendMessage({ type: "ail-history-transition", transition }).catch(() => {});
+  });
+  const emitPersonalBets = (bets) => {
+    if (bets.length) browser.runtime.sendMessage({ type: "ail-personal-bets", bets: bets.slice(0, 100) }).catch(() => {});
+  };
   const recentMutationTargets = [];
   const observedRoots = new WeakSet();
   let scheduledScan = null;
@@ -688,11 +840,14 @@ if (typeof browser !== "undefined" && typeof document !== "undefined") {
     report.multiplierCandidateChanges = trackCandidateChanges(report);
     report.historyEvolution = trackHistoryEvolution(report.multiplierHistories);
     report.historyTransitions = logHistoryTransitions(report.multiplierHistories);
+    emitHistoryTransition(report.multiplierHistories);
+    emitPersonalBets(inspectPersonalBets(document));
+    report.aggregateSamples = sampleAggregates(report.roundAggregates);
     report.resultFinality = "indéterminée : une mutation ou une valeur numérique ne confirme pas la fin d'une manche";
     if (isTopFrame) {
       const reportNumber = inspectionNumber;
       reportBox.value = JSON.stringify(report, null, 2);
-      state.textContent = "DOM accessible inspecté localement; extraction désactivée.";
+      state.textContent = `DOM inspecté localement; ${inspectPersonalBets(document).length} pari(s) affiché(s) détecté(s).`;
       browser.runtime.sendMessage({ type: "ail-get-frame-diagnostics" }).then((frameReports) => {
         if (reportNumber !== inspectionNumber) return;
         const reports = Array.isArray(frameReports) ? frameReports : [];
@@ -755,7 +910,7 @@ if (typeof browser !== "undefined" && typeof document !== "undefined") {
   const sendHeartbeat = () => {
     if (!isTopFrame) return;
     browser.runtime.sendMessage({ type: "ail-heartbeat" }).then((connected) => {
-      connectionState.textContent = connected ? "API locale connectée; aucun multiplicateur transmis." : "API locale hors ligne; nouvel essai périodique prévu.";
+      connectionState.textContent = connected ? "API locale connectée; enregistrement des manches actif." : "API locale hors ligne; nouvel essai périodique prévu.";
     }).catch(() => { connectionState.textContent = "API locale hors ligne; nouvel essai périodique prévu."; });
   };
   window.setInterval(sendHeartbeat, 30_000);

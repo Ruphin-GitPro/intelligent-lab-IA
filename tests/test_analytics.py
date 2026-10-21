@@ -1,6 +1,11 @@
 import pytest
 
-from aviator_lab.analytics import descriptive_stats
+from aviator_lab.analytics import (
+    descriptive_stats,
+    next_round_interval,
+    next_round_median,
+    rolling_median_backtest,
+)
 from aviator_lab.probability import empirical_exceedance_probability
 from aviator_lab.storage import RoundRepository
 
@@ -103,3 +108,42 @@ def test_analyses_can_filter_real_and_simulated_rounds_separately(tmp_path):
         assert real_stats.origin != simulated_stats.origin
     finally:
         repository.close()
+
+
+def test_rolling_forecast_uses_only_values_before_the_target_round():
+    points = rolling_median_backtest([1.2, 1.4, 9.0, 1.6], window=2)
+
+    assert [point.prediction for point in points] == pytest.approx([1.2, 1.3, 5.2])
+    assert points[1].interval_low == pytest.approx(1.22)
+    assert points[1].interval_high == pytest.approx(1.38)
+    assert [point.actual for point in points] == [1.4, 9.0, 1.6]
+    assert points[1].signed_error == pytest.approx(7.7)
+    assert points[1].absolute_error == pytest.approx(7.7)
+    assert points[1].last_value_baseline == 1.4
+    assert points[1].baseline_absolute_error == pytest.approx(7.6)
+
+
+def test_next_round_forecast_uses_only_the_last_configured_window():
+    assert next_round_median([1, 2, 3, 10], window=3) == 3
+    assert next_round_median([], window=3) is None
+    interval = next_round_interval([1, 2, 3, 10], window=3)
+    assert interval is not None
+    assert interval[0] <= 3 <= interval[1]
+    assert next_round_interval([], window=3) is None
+    assert next_round_interval([1.1, 1.5], window=3) is None
+
+
+def test_hundred_round_window_uses_the_last_hundred_results():
+    values = [1.0] * 90 + [2.0] * 10
+
+    assert next_round_median(values, window=100) == 1.0
+    assert next_round_median(values, window=10) == 2.0
+
+
+def test_backtest_predictions_do_not_change_when_future_data_is_appended():
+    initial = rolling_median_backtest([1.2, 1.4, 3.0, 1.5], window=2)
+    extended = rolling_median_backtest([1.2, 1.4, 3.0, 1.5, 8.0], window=2)
+
+    assert [(point.round_number, point.prediction) for point in initial] == [
+        (point.round_number, point.prediction) for point in extended[:len(initial)]
+    ]
